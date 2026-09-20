@@ -10,11 +10,48 @@ iOS 18+, and macOS 15+ and has no third-party dependencies.
 | `SecureStorage` | Store opaque bytes in Keychain | Foundation, Security |
 | `SecureSession` | Persist credentials, serialize refresh, publish lifecycle changes | SecureStorage |
 | `HTTPTransport` | Build and execute generic HTTP/JSON requests | Foundation |
+| `HTTPFileTransfer` | Upload and download files with progress, cancellation, bounded response data, and atomic publication | HTTPTransport |
 | `AuthenticatedHTTP` | Add Bearer authentication and one challenge replay | SecureSession, HTTPTransport |
 
 Applications retain base URLs, route components, backend DTOs, refresh adapters, and translation from
 generic transport failures to domain errors. `AuthenticatedHTTP` is opt-in: use the plain
-`JSONAPIClient` for requests that must never receive session credentials.
+`JSONAPIClient` for requests that must never receive session credentials. `HTTPFileTransfer` never
+chooses endpoints, multipart field names, retries, idempotency, or authentication replay.
+
+## File transfers
+
+`HTTPFileTransfer` uploads regular files directly and renders multipart forms to a task-owned
+temporary file. Downloads are status-validated and staged before one final move or replacement at
+the requested destination. Progress is best-effort; cancellation finishes the event stream by
+throwing and removes owned temporary data.
+
+```swift
+import HTTPFileTransfer
+import HTTPTransport
+
+let client = URLSessionFileTransferClient()
+let transfer = client.download(
+    FileDownloadRequest(
+        url: downloadURL,
+        authorization: .bearer(accessToken),
+        destinationURL: destinationURL
+    )
+)
+
+for try await event in transfer.events() {
+    switch event {
+    case .progress(let progress):
+        updateProgress(progress.completedByteCount, total: progress.totalByteCount)
+    case .completed(let result):
+        useDownloadedFile(result.fileURL)
+    }
+}
+```
+
+Upload response data and rejected download response data are limited to 64 KiB. `retryAfter` and
+`requestID` on `HTTPResponse` expose generic metadata only; applications decide whether a transfer
+is safe to retry. For unsafe operations, do not layer automatic `AuthenticatedHTTP` challenge replay
+around the transfer.
 
 ## Installation
 
@@ -30,7 +67,8 @@ swift test
 ```
 
 The suite covers Keychain behavior, credential migration and lifecycle, concurrent refresh,
-request construction and escaping, transport classification, Bearer isolation, and bounded replay.
+request construction and escaping, transport classification, file-backed multipart construction,
+transfer progress and cancellation, atomic downloads, Bearer isolation, and bounded replay.
 
 ## Spec Kit workflow
 

@@ -145,10 +145,50 @@ public struct HTTPResponse: Sendable {
     public func header(_ name: String) -> String? {
         headers.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
     }
+
+    /// The delay requested by a `Retry-After` header, or `nil` when absent or malformed.
+    ///
+    /// Both nonnegative delta-seconds and standard HTTP-date forms are accepted. This value is
+    /// informational only; retry safety and scheduling remain the application's responsibility.
+    public var retryAfter: TimeInterval? {
+        guard let value = header("Retry-After")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else { return nil }
+        if value.allSatisfy(\.isNumber), let seconds = Int64(value) {
+            return TimeInterval(seconds)
+        }
+
+        let formats = [
+            "EEE',' dd MMM yyyy HH':'mm':'ss z",
+            "EEEE',' dd-MMM-yy HH':'mm':'ss z",
+            "EEE MMM  d HH':'mm':'ss yyyy",
+            "EEE MMM d HH':'mm':'ss yyyy",
+        ]
+        for format in formats {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = format
+            if let date = formatter.date(from: value) {
+                return max(0, date.timeIntervalSinceNow)
+            }
+        }
+        return nil
+    }
+
+    /// A common non-secret request-correlation header value, when present.
+    ///
+    /// Applications decide whether a provider's identifier is appropriate to surface. Header
+    /// lookup is case-insensitive and this property performs no logging.
+    public var requestID: String? {
+        for name in ["X-Request-ID", "Request-ID", "X-Correlation-ID", "X-Amzn-RequestId", "CF-Ray"] {
+            if let value = header(name), !value.isEmpty { return value }
+        }
+        return nil
+    }
 }
 
 /// Backend-neutral failures raised while building, sending, validating, or decoding HTTP requests.
-public enum HTTPTransportError: Error, Sendable {
+public enum HTTPTransportError: Error, Sendable, CustomStringConvertible {
     /// The network is unavailable or the connection was lost.
     case offline
     /// The operation was cancelled.
@@ -169,4 +209,19 @@ public enum HTTPTransportError: Error, Sendable {
     ///
     /// The associated text is diagnostic and must not contain authorization headers or tokens.
     case transport(String)
+
+    /// A stable diagnostic classification that never prints response bodies or associated text.
+    public var description: String {
+        switch self {
+        case .offline: "The network is unavailable."
+        case .cancelled: "The transport operation was cancelled."
+        case .timedOut: "The transport operation timed out."
+        case .invalidResponse: "The transport returned a non-HTTP response."
+        case .invalidURL: "The request URL is invalid."
+        case .encoding: "The request could not be encoded."
+        case .decoding: "The response could not be decoded."
+        case .unsuccessful(let response): "The HTTP response status was not accepted (\(response.statusCode))."
+        case .transport: "The transport operation failed."
+        }
+    }
 }
